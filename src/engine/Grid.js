@@ -4,8 +4,7 @@ export class Grid {
     this.height = height;
     this.cellSize = 40; // 40px per cell
     this.cells = Array(height).fill(null).map(() => Array(width).fill(0));
-    // 0 = empty, 1 = solid wall, 2 = destructible block, 3 = fire
-    this.generateLevel();
+    // 0 = empty, 1 = solid wall, 2 = destructible block
   }
 
   generateLevel() {

@@ -16,6 +16,7 @@ export class GeneticAlgorithm {
     this.population = [];
     this.generation = 1;
     this.bestFitness = 0;
+    this.avgFitness = 0;
     this.bestAgentWeights = null;
     this.initPopulation();
   }
@@ -24,71 +25,83 @@ export class GeneticAlgorithm {
     for (let i = 0; i < this.populationSize; i++) {
       tf.tidy(() => {
         const dummy = new TFNeuralNetwork(this.inputSize, this.hiddenLayers, this.hiddenSize, this.outputSize);
-        // We MUST use tf.keep so the tensors survive the tidy disposal
+        // tf.keep ensures tensors survive the tidy disposal
         const genome = dummy.getWeights().map(t => tf.keep(t.clone()));
         this.population.push(genome);
       });
     }
   }
 
-  // Run a full generation
+  // ─── Evaluate one full generation ───────────────────────────────────────────
   async evaluateGeneration(onProgress) {
     const scores = [];
 
-    // Shuffle indices for random 4-player matchmaking
+    // Shuffle population indices for random matchmaking
     const indices = Array.from({ length: this.populationSize }, (_, i) => i);
     indices.sort(() => Math.random() - 0.5);
 
-    // 1. Play exactly ONE match visually on the main canvas so the user can watch the training
-    const visualGenomes = [
-      this.population[indices[0]],
-      this.population[indices[1]],
-      this.population[indices[2]],
-      this.population[indices[3]]
-    ];
-    const visualScores = await this.simulateVisual4Players(visualGenomes, this.canvas);
-    for (let j = 0; j < 4; j++) {
-      scores.push({ genome: visualGenomes[j], score: visualScores[j] });
-    }
-    if (onProgress) onProgress(4, this.populationSize);
+    const totalGroups = Math.ceil(this.populationSize / 4);
 
-    // 2. Evaluate everyone else headlessly in the background
-    for (let i = 4; i < this.populationSize; i += 4) {
-      const matchGenomes = [
-        this.population[indices[i]],
-        this.population[indices[i + 1]],
-        this.population[indices[i + 2]],
-        this.population[indices[i + 3]]
-      ];
-      const matchScores = await this.simulateHeadless4Players(matchGenomes);
+    for (let g = 0; g < totalGroups; g++) {
+      // Build a group of 4 (pad with random agents if the last group is short)
+      const matchGenomes = [];
+      const actualCount = Math.min(4, this.populationSize - g * 4);
       for (let j = 0; j < 4; j++) {
-        scores.push({ genome: matchGenomes[j], score: matchScores[j] });
+        if (j < actualCount) {
+          matchGenomes.push(this.population[indices[g * 4 + j]]);
+        } else {
+          matchGenomes.push(this.population[Math.floor(Math.random() * this.populationSize)]);
+        }
       }
-      if (onProgress) onProgress(i + 4, this.populationSize);
+
+      let matchScores;
+
+      // Strategy 1 — visualise only the FIRST group per generation (≈1/totalGroups %)
+      if (g === 0) {
+        matchScores = await this.simulateVisual4Players(matchGenomes, this.canvas);
+      } else {
+        matchScores = await this.simulateHeadless4Players(matchGenomes);
+      }
+
+      for (let j = 0; j < actualCount; j++) {
+        scores.push({
+          genome: matchGenomes[j],
+          score: matchScores[j].score,
+          breakdown: matchScores[j].breakdown,
+        });
+      }
+
+      if (onProgress) onProgress(Math.min((g + 1) * 4, this.populationSize), this.populationSize);
     }
 
-    // Sort by fitness (descending)
+    // ── Sort descending by fitness ──────────────────────────────────────────
     scores.sort((a, b) => b.score - a.score);
 
-    if (scores[0].score > this.bestFitness) {
-      this.bestFitness = scores[0].score;
-      // Save best weights detached from graph context
+    // ── Track stats ────────────────────────────────────────────────────────
+    const maxScore = scores[0].score;
+    const avgScore = scores.reduce((s, e) => s + e.score, 0) / scores.length;
+    this.avgFitness = avgScore;
+
+    if (maxScore > this.bestFitness) {
+      this.bestFitness = maxScore;
       if (this.bestAgentWeights) {
         this.bestAgentWeights.forEach(t => t.dispose());
       }
-      this.bestAgentWeights = [];
-      scores[0].genome.forEach(t => this.bestAgentWeights.push(t.clone()));
+      this.bestAgentWeights = scores[0].genome.map(t => t.clone());
     }
 
-    console.log(`Generation ${this.generation} completed. Best Score: ${scores[0].score}`);
+    console.log(`Gen ${this.generation} | Best: ${maxScore.toFixed(0)} | Avg: ${avgScore.toFixed(0)}`);
+    // if (scores[0].breakdown) {
+    // console.table(scores[0].breakdown);
+    // }
 
     this.population = this.nextGeneration(scores);
     this.generation++;
 
-    return scores[0].score; // Return best score of generation
+    return { best: maxScore, avg: avgScore };
   }
 
-  // Start a headless simulation loop
+  // ─── Headless simulation ────────────────────────────────────────────────────
   simulateHeadless4Players(genomes) {
     return new Promise(resolve => {
       const simCanvas = document.createElement('canvas');
@@ -100,7 +113,7 @@ export class GeneticAlgorithm {
         { x: 1, y: 1 },
         { x: game.gridWidth - 2, y: 1 },
         { x: 1, y: game.gridHeight - 2 },
-        { x: game.gridWidth - 2, y: game.gridHeight - 2 }
+        { x: game.gridWidth - 2, y: game.gridHeight - 2 },
       ];
 
       const agents = [];
@@ -112,19 +125,23 @@ export class GeneticAlgorithm {
         agents.push(p);
       }
 
+      const MIN_TICKS = GLOBAL_VARS.minTicksPerMatch;
+      const MAX_TICKS = GLOBAL_VARS.maxTicksPerMatch;
       let ticks = 0;
-      const MAX_TICKS = 500;
 
-      while (ticks < MAX_TICKS && agents.filter(a => a.alive).length > 1) {
+      while (ticks < MAX_TICKS) {
         game.update(16);
         ticks++;
+        // Only allow early exit after the minimum floor has been reached
+        if (ticks >= MIN_TICKS && agents.filter(a => a.alive).length <= 1) break;
       }
 
-      const fitnesses = agents.map(a => a.calculateFitness());
-      resolve(fitnesses);
+      const results = agents.map(a => ({ score: a.calculateFitness(), breakdown: a.fitnessBreakdown }));
+      resolve(results);
     });
   }
 
+  // ─── Visual simulation ──────────────────────────────────────────────────────
   simulateVisual4Players(genomes, canvas) {
     return new Promise(resolve => {
       const game = new Game(canvas, false);
@@ -134,7 +151,7 @@ export class GeneticAlgorithm {
         { x: 1, y: 1 },
         { x: game.gridWidth - 2, y: 1 },
         { x: 1, y: game.gridHeight - 2 },
-        { x: game.gridWidth - 2, y: game.gridHeight - 2 }
+        { x: game.gridWidth - 2, y: game.gridHeight - 2 },
       ];
 
       const agents = [];
@@ -146,8 +163,9 @@ export class GeneticAlgorithm {
         agents.push(p);
       }
 
+      const MIN_TICKS = GLOBAL_VARS.minTicksPerMatch;
+      const MAX_TICKS = GLOBAL_VARS.maxTicksPerMatch;
       let ticks = 0;
-      const MAX_TICKS = 2000;
       let lastTime = performance.now();
 
       const frame = (t) => {
@@ -163,9 +181,10 @@ export class GeneticAlgorithm {
           game.accumulator -= 16;
           ticks++;
 
-          if (agents.filter(a => a.alive).length <= 1 || ticks >= MAX_TICKS) {
-            const fitnesses = agents.map(a => a.calculateFitness());
-            resolve(fitnesses);
+          const canEnd = ticks >= MIN_TICKS && (agents.filter(a => a.alive).length <= 1 || ticks >= MAX_TICKS);
+          if (canEnd) {
+            const results = agents.map(a => ({ score: a.calculateFitness(), breakdown: a.fitnessBreakdown }));
+            resolve(results);
             return;
           }
         }
@@ -177,37 +196,37 @@ export class GeneticAlgorithm {
     });
   }
 
+  // ─── Build next generation ──────────────────────────────────────────────────
   nextGeneration(scoredPopulation) {
     const nextPop = [];
-    const elites = 2; // Keep top 2 without mutation
+    const eliteCount = Math.max(2, Math.round(this.populationSize * GLOBAL_VARS.elitismRate));
 
-    tf.tidy(() => {
-      // Elitism
-      for (let i = 0; i < elites; i++) {
-        const cloned = scoredPopulation[i].genome.map(t => tf.keep(t.clone()));
-        nextPop.push(cloned);
-      }
+    // Strategy 3 — Elitism: clone top performers directly
+    for (let i = 0; i < eliteCount; i++) {
+      const cloned = scoredPopulation[i].genome.map(t => tf.keep(t.clone()));
+      nextPop.push(cloned);
+    }
 
-      // Fill the rest with crossover + mutation
-      while (nextPop.length < this.populationSize) {
-        const parentA = this.tournamentSelection(scoredPopulation);
-        const parentB = this.tournamentSelection(scoredPopulation);
+    // Fill the rest with crossover + mutation
+    while (nextPop.length < this.populationSize) {
+      const parentA = this.tournamentSelection(scoredPopulation);
+      const parentB = this.tournamentSelection(scoredPopulation);
 
-        const child = this.crossover(parentA, parentB);
-        const mutatedChild = this.mutate(child);
+      const child = this.crossover(parentA, parentB);
+      const mutatedChild = this.mutate(child);
 
-        nextPop.push(mutatedChild.map(t => tf.keep(t)));
-      }
-    });
+      nextPop.push(mutatedChild.map(t => tf.keep(t)));
+    }
 
-    // Dispose old population tensors
+    // Dispose old population tensors now that all children are built
     scoredPopulation.forEach(s => s.genome.forEach(t => t.dispose()));
 
     return nextPop;
   }
 
+  // ─── Tournament selection (fixed: starts at i=0) ────────────────────────────
   tournamentSelection(scoredPopulation) {
-    const tournamentSize = 3;
+    const tournamentSize = GLOBAL_VARS.tournamentSize;
     let best = null;
     for (let i = 0; i < tournamentSize; i++) {
       const candidate = scoredPopulation[Math.floor(Math.random() * scoredPopulation.length)];
@@ -218,6 +237,7 @@ export class GeneticAlgorithm {
     return best.genome;
   }
 
+  // ─── Crossover ──────────────────────────────────────────────────────────────
   crossover(parentA, parentB) {
     return parentA.map((wA, idx) => {
       const wB = parentB[idx];
@@ -236,9 +256,11 @@ export class GeneticAlgorithm {
     });
   }
 
+  // ─── Mutation: 95% soft / 5% hard ───────────────────────────────────────────
   mutate(genome) {
-    const mutationRate = 0.05; // Drop back to 5%. 80% is pure random noise!
-    const mutationStrength = 1.0;
+    const isHard = Math.random() < GLOBAL_VARS.hardMutationChance;
+    const mutationRate = isHard ? GLOBAL_VARS.hardMutationRate : GLOBAL_VARS.softMutationRate;
+    const mutationStrength = isHard ? GLOBAL_VARS.hardMutationStrength : GLOBAL_VARS.softMutationStrength;
 
     return genome.map(tensor => {
       const shape = tensor.shape;
@@ -248,7 +270,7 @@ export class GeneticAlgorithm {
       for (let i = 0; i < values.length; i++) {
         if (Math.random() < mutationRate) {
           let val = values[i] + (Math.random() * 2 - 1) * mutationStrength;
-          // Clamp weights
+          // Clamp weights to avoid exploding gradients
           if (val > 10) val = 10;
           if (val < -10) val = -10;
           newValues[i] = val;

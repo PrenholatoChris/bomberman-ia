@@ -15,6 +15,7 @@ export class Player {
     this.totalBombsPlaced = 0;
     this.bombRange = 2;
     this.alive = true;
+    this.wallHits = 0;
     this.walks = 0;
 
     // Pixel sizing
@@ -43,12 +44,14 @@ export class Player {
     if (!this.checkCollision(nextPx, this.py, grid)) {
       this.px = nextPx;
       moved = true;
+    } else {
+      this.wallHits++;
     }
     if (!this.checkCollision(this.px, nextPy, grid)) {
       this.py = nextPy;
       moved = true;
     } else {
-      this.wallHits = (this.wallHits || 0) + 1;
+      this.wallHits++;
     }
 
     if (moved && (this.dx !== 0 || this.dy !== 0)) {

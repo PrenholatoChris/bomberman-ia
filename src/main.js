@@ -3,12 +3,32 @@ import { GeneticAlgorithm } from './ai/GeneticAlgorithm.js';
 import { Agent } from './ai/Agent.js';
 
 export const GLOBAL_VARS = {
+  // ── Grid / network ──────────────────────────────
   gridWidth: 15,
   gridHeight: 13,
   inputChannels: 5,
   hiddenLayers: 2,
   hiddenSize: 16,
-  populationSize: 100
+
+  // ── Population ──────────────────────────────────
+  populationSize: 200,
+
+  // ── Elitism ─────────────────────────────────────
+  elitismRate: 0.05,       // fraction of population kept unchanged (5%)
+
+  // ── Tournament selection ─────────────────────────
+  tournamentSize: 5,
+
+  // ── Mutation ────────────────────────────────────
+  softMutationRate: 0.10,       // % of weights changed on a soft mutation
+  softMutationStrength: 0.15,
+  hardMutationRate: 0.50,       // % of weights changed on a hard mutation
+  hardMutationStrength: 2.0,
+  hardMutationChance: 0.05,     // probability that a child gets a hard mutation
+
+  // ── Simulation ──────────────────────────────────
+  minTicksPerMatch: 300,        // floor: match cannot end before this tick
+  maxTicksPerMatch: 2000,
 };
 const canvas = document.getElementById('gameCanvas');
 const btnPlay = document.getElementById('btnPlay');
@@ -24,6 +44,7 @@ const statsDiv = document.getElementById('stats');
 const genText = document.getElementById('genText');
 const progText = document.getElementById('progText');
 const fitText = document.getElementById('fitText');
+const avgFitText = document.getElementById('avgFitText');
 
 // Speed UI
 const speedInput = document.getElementById('speedInput');
@@ -48,11 +69,12 @@ btnTrain.addEventListener('click', async (e) => {
   while (isTraining) {
     genText.innerText = ga.generation;
 
-    await ga.evaluateGeneration((current, total) => {
+    const { best, avg } = await ga.evaluateGeneration((current, total) => {
       progText.innerText = `${current}/${total}`;
     });
 
-    fitText.innerText = Math.round(ga.bestFitness);
+    fitText.innerText = Math.round(best);
+    if (avgFitText) avgFitText.innerText = Math.round(avg);
   }
 });
 

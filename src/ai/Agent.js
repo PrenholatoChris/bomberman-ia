@@ -69,11 +69,12 @@ export class Agent extends Player {
 
     this.nn = new TFNeuralNetwork(this.inputSize, GLOBAL_VARS.hiddenLayers, GLOBAL_VARS.hiddenSize, 6, weights);
 
-    this.fitness = 0;
+    this.fitness = 10000;
     this.survivalTime = 0;
     this.blocksDestroyed = 0;
     this.enemiesKilled = 0;
     this.uniqueTiles = new Set();
+    this.wallHits = 0;
 
     this.actionCooldown = 0;
   }
@@ -83,8 +84,13 @@ export class Agent extends Player {
     this.uniqueTiles.add(`${this.x},${this.y}`);
 
     if (this.actionCooldown <= 0) {
+      const prevDx = this.dx;
+      const prevDy = this.dy;
       this.makeDecision(grid, game);
-      this.actionCooldown = 15; // Decisions every ~0.25 seconds
+      // If agent chose to wait (no movement, no bomb), use a shorter cooldown
+      // so it can quickly reconsider rather than being locked into idling.
+      const isWaiting = this.dx === 0 && this.dy === 0 && prevDx === 0 && prevDy === 0;
+      this.actionCooldown = isWaiting ? 5 : 15;
     } else {
       this.actionCooldown--;
     }
@@ -150,29 +156,41 @@ export class Agent extends Player {
   }
 
   calculateFitness() {
-    let winBonus = this.alive && this.enemiesKilled > 0 ? 5000 : 0;
+    const winBonus = this.alive && this.enemiesKilled > 0 ? 5000 : 0;
 
-    // De-value pure survival to stop agents from hiding safely in corners.
-    // Extremely heavily value exploration (unique tiles) and actions (bombs, kills)
-    this.fitness = (this.survivalTime * 0.1) +
+    // Only penalize agents that survive WITHOUT exploring (standing-still strategy).
+    // Surviving long while exploring is fully rewarded — no long-game penalty.
+    const explorationRatio = this.uniqueTiles.size / Math.max(1, this.survivalTime);
+    const stagnationPenalty = explorationRatio < 0.05 ? this.survivalTime * 0.5 : 0;
+
+    this.fitness = this.fitness +
+      (this.survivalTime * 0.1) +
       (this.blocksDestroyed * 500) +
       (this.enemiesKilled * 1000) +
       (this.uniqueTiles.size * 200) +
-      (this.totalBombsPlaced * 300) +
-      (this.walks * 100) +
+      (this.totalBombsPlaced * 300) -
+      (this.wallHits * 100) -
+      (this.alive ? 0 : 10000) -
+      stagnationPenalty +
       winBonus;
 
-    //punish them for living too long
-    if (this.survivalTime > 1000) {
-      this.fitness -= (this.survivalTime * 0.1);
-    }
+    this.fitnessBreakdown = {
+      survival: +(this.survivalTime * 0.1).toFixed(1),
+      blocks: this.blocksDestroyed * 500,
+      kills: this.enemiesKilled * 1000,
+      exploration: this.uniqueTiles.size * 200,
+      bombs: this.totalBombsPlaced * 300,
+      wallPenalty: -(this.wallHits * 100),
+      deathPenalty: this.alive ? 0 : -10000,
+      stagnation: -stagnationPenalty,
+      winBonus,
+      total: +Math.max(1, this.fitness).toFixed(1),
+    };
 
-    // Punish them for repeatedly walking blindly into solid walls to force them to learn to turn
-    if (this.wallHits) {
-      this.fitness -= (this.wallHits * 300);
-    }
-
-    // Prevent negative fitness which breaks tournament selection
+    // Prevent negative fitness which breaks tournament selection proportionality
+    //mas o fitness esta retornando sempre 1, pois inicialmente o modelo toma muitas penalidades
+    //e o valor minimo é 1.
+    //aumentar a pontuacao inicial de 0 para 10000
     return Math.max(1, this.fitness);
   }
 
